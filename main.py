@@ -2,6 +2,7 @@ import os
 import sqlite3
 from datetime import datetime
 import aiohttp
+import asyncio
 
 from aiogram import Bot, Dispatcher, executor, types
 
@@ -57,6 +58,15 @@ def init_db():
         )
     """)
 
+    # Для polling: хранить последний обработанный comment_id по лиду
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS lead_state (
+            lead_id INTEGER PRIMARY KEY,
+            last_comment_id INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -99,6 +109,44 @@ def get_lead_id_by_user_id(user_id: int):
     row = cur.fetchone()
     conn.close()
     return row[0] if row else None
+
+
+def get_user_id_by_lead_id(lead_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM crm_links WHERE lead_id = ?", (lead_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def get_all_lead_ids():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT lead_id FROM crm_links")
+    rows = cur.fetchall()
+    conn.close()
+    return [r[0] for r in rows] if rows else []
+
+
+def get_last_comment_id(lead_id: int) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT last_comment_id FROM lead_state WHERE lead_id = ?", (lead_id,))
+    row = cur.fetchone()
+    conn.close()
+    return int(row[0]) if row else 0
+
+
+def set_last_comment_id(lead_id: int, last_comment_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT OR REPLACE INTO lead_state(lead_id, last_comment_id, updated_at) VALUES (?, ?, ?)",
+        (int(lead_id), int(last_comment_id), datetime.utcnow().isoformat())
+    )
+    conn.commit()
+    conn.close()
 
 
 def save_thread(user_id: int, thread_id: int):
@@ -154,7 +202,7 @@ async def lpt_request(session: aiohttp.ClientSession, method: str, path: str, js
         data = await resp.json(content_type=None)
 
     # token expired -> relogin once
-    if data.get("status") == "error":
+    if isinstance(data, dict) and data.get("status") == "error":
         errors = data.get("errors") or []
         if any(e.get("code") == 401 for e in errors):
             await lpt_login(session)
@@ -172,12 +220,11 @@ async def lpt_get_contact_field_id_by_name(session: aiohttp.ClientSession, field
     """
     global _lp_telegram_field_id
 
-    # уже искали: _lp_telegram_field_id = int (нашли) или 0 (не нашли)
     if _lp_telegram_field_id is not None:
         return _lp_telegram_field_id if _lp_telegram_field_id != 0 else None
 
     data = await lpt_request(session, "GET", f"/project/{LP_PROJECT_ID}/fields", json_body=None)
-    if not data or data.get("status") != "success":
+    if not isinstance(data, dict) or data.get("status") != "success":
         _lp_telegram_field_id = 0
         return None
 
@@ -196,9 +243,9 @@ async def lpt_get_contact_field_id_by_name(session: aiohttp.ClientSession, field
 
 async def lpt_create_lead(session: aiohttp.ClientSession, tg_user: types.User) -> int:
     """
-    ВАЖНОЕ ИСПРАВЛЕНИЕ:
-    LPTracker требует contact.details (email/phone). Поэтому кладем details внутрь contact.
-    Также пишем username в кастомное поле контакта "Telegram" (если такое поле есть в проекте).
+    Исправление 'details is required':
+    LPTracker ждёт contact.details (email/phone). Поэтому кладём details внутрь contact.
+    Также стараемся заполнить поле контакта "Telegram" (username), если такое поле есть в проекте.
     """
     lead_name = f"Telegram: {(tg_user.full_name or 'Клиент').strip()}"
 
@@ -207,7 +254,7 @@ async def lpt_create_lead(session: aiohttp.ClientSession, tg_user: types.User) -
         {"type": "email", "data": f"tg{tg_user.id}@telegram.invalid"}
     ]
 
-    # кастомное поле контакта "Telegram" (как у тебя в карточке)
+    # кастомное поле контакта "Telegram" (как в карточке)
     contact_fields = {}
     if tg_user.username:
         telegram_field_id = await lpt_get_contact_field_id_by_name(session, "Telegram")
@@ -227,7 +274,7 @@ async def lpt_create_lead(session: aiohttp.ClientSession, tg_user: types.User) -
         body["contact"]["fields"] = contact_fields
 
     data = await lpt_request(session, "POST", "/lead", json_body=body)
-    if data.get("status") != "success":
+    if not isinstance(data, dict) or data.get("status") != "success":
         raise RuntimeError(f"LPTracker create lead error: {data}")
 
     return int(data["result"]["id"])
@@ -235,8 +282,16 @@ async def lpt_create_lead(session: aiohttp.ClientSession, tg_user: types.User) -
 
 async def lpt_add_comment(session: aiohttp.ClientSession, lead_id: int, text: str):
     data = await lpt_request(session, "POST", f"/lead/{lead_id}/comment", json_body={"text": text})
-    if data.get("status") != "success":
+    if not isinstance(data, dict) or data.get("status") != "success":
         raise RuntimeError(f"LPTracker add comment error: {data}")
+
+
+async def lpt_get_comments(session: aiohttp.ClientSession, lead_id: int):
+    # GET /lead/{lead_id}/comments
+    data = await lpt_request(session, "GET", f"/lead/{lead_id}/comments", json_body=None)
+    if not isinstance(data, dict) or data.get("status") != "success":
+        raise RuntimeError(f"LPTracker get comments error: {data}")
+    return data.get("result") or []
 
 
 # ===== Telegram Topics helper =====
@@ -278,6 +333,17 @@ def client_header(user: types.User) -> str:
         f"🔗 <b>Username</b>: {username}\n"
         f"🆔 <b>ID</b>: <code>{user.id}</code>\n"
         f"✍️ <i>Отвечайте на сообщение цитатой</i>"
+    )
+
+
+def is_our_incoming_comment(text: str) -> bool:
+    if not text:
+        return False
+    t = text.strip().lower()
+    return (
+        t.startswith("telegram сообщение от клиента:".lower())
+        or t.startswith("telegram: клиент прислал".lower())
+        or t.startswith("telegram: клиент прислал вложение".lower())
     )
 
 
@@ -352,6 +418,7 @@ async def from_group_to_client(message: types.Message):
     # работаем только в нашей группе
     if message.chat.id != GROUP_ID:
         return
+
     # игнорируем сообщения от ботов (в т.ч. от нашего бота),
     # иначе бот будет ругаться сам на себя
     if message.from_user and message.from_user.is_bot:
@@ -381,6 +448,81 @@ async def from_group_to_client(message: types.Message):
         await message.copy_to(chat_id=user_id)
 
 
+async def lpt_polling_loop():
+    """
+    Раз в N секунд проверяем новые комментарии в лидах (crm_links),
+    и если это комментарий менеджера — отправляем его клиенту в Telegram.
+    """
+    POLL_SECONDS = 8  # можно 5-15 сек
+
+    while True:
+        try:
+            if not lpt_enabled():
+                await asyncio.sleep(POLL_SECONDS)
+                continue
+
+            lead_ids = get_all_lead_ids()
+            if not lead_ids:
+                await asyncio.sleep(POLL_SECONDS)
+                continue
+
+            async with aiohttp.ClientSession() as session:
+                for lead_id in lead_ids:
+                    user_id = get_user_id_by_lead_id(lead_id)
+                    if not user_id:
+                        continue
+
+                    last_seen = get_last_comment_id(lead_id)
+
+                    try:
+                        comments = await lpt_get_comments(session, lead_id)
+                    except Exception:
+                        continue
+
+                    new_comments = []
+                    for c in comments:
+                        try:
+                            cid = int(c.get("id", 0))
+                        except Exception:
+                            cid = 0
+
+                        if cid > last_seen:
+                            text = c.get("text", "") or ""
+                            new_comments.append((cid, text))
+
+                    if not new_comments:
+                        continue
+
+                    new_comments.sort(key=lambda x: x[0])
+
+                    max_sent = last_seen
+                    for cid, text in new_comments:
+                        if not text.strip():
+                            max_sent = max(max_sent, cid)
+                            continue
+
+                        # игнорим комментарии, которые добавляет бот (входящие из Telegram)
+                        if is_our_incoming_comment(text):
+                            max_sent = max(max_sent, cid)
+                            continue
+
+                        # отправляем клиенту
+                        await bot.send_message(chat_id=user_id, text=text)
+                        max_sent = max(max_sent, cid)
+
+                    if max_sent > last_seen:
+                        set_last_comment_id(lead_id, max_sent)
+
+        except Exception:
+            pass
+
+        await asyncio.sleep(POLL_SECONDS)
+
+
+async def on_startup(_):
+    asyncio.create_task(lpt_polling_loop())
+
+
 if __name__ == "__main__":
     init_db()
-    executor.start_polling(dp, skip_updates=True)
+    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
