@@ -79,7 +79,7 @@ async def from_client_to_group(message: types.Message):
     if message.text:
         sent = await bot.send_message(
             chat_id=GROUP_ID,
-            text=f"{header}\n\n💬 <b>Сообщение:</b>\n{message.text}"
+            text=f"{header}\n\n💬 <b>Сообщение клиента:</b>\n{message.text}"
         )
         save_link(sent.message_id, message.from_user.id)
         return
@@ -119,4 +119,5 @@ async def from_group_to_client(message: types.Message):
 if __name__ == "__main__":
     init_db()
     executor.start_polling(dp, skip_updates=True)
+
 
