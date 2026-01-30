@@ -293,23 +293,37 @@ async def from_client_to_group(message: types.Message):
 
 @dp.message_handler(content_types=types.ContentTypes.ANY)
 async def from_group_to_client(message: types.Message):
+    # работаем только в нашей группе
     if message.chat.id != GROUP_ID:
         return
-    if not message.reply_to_message:
+
+    # не реагируем на команды типа /id
+    if message.text and message.text.strip().startswith("/"):
         return
 
+    # если менеджер написал БЕЗ reply — показываем предупреждение
+    if not message.reply_to_message:
+        warning_text = "❗ Сообщение клиенту не отправлено. Отвечать клиенту нужно через цитату. Отправьте свой ответ повторно через цитирование сообщения клиента"
+        await message.reply(warning_text)
+        return
+
+    # если ответили не на сообщение клиента
     replied_id = message.reply_to_message.message_id
     user_id = get_user_id_by_group_message_id(replied_id)
     if not user_id:
+        await message.reply("❗ Сообщение клиенту не отправлено. Отвечать клиенту нужно через цитату. Отправьте свой ответ повторно через цитирование сообщения клиента")
         return
 
+    # отправляем клиенту
     if message.text:
         await bot.send_message(chat_id=user_id, text=message.text)
     else:
         await message.copy_to(chat_id=user_id)
 
 
+
 if __name__ == "__main__":
     init_db()
     executor.start_polling(dp, skip_updates=True)
+
 
