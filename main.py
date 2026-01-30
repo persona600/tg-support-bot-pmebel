@@ -62,7 +62,7 @@ def client_header(user: types.User) -> str:
         f"👤 <b>Клиент</b>: {name}\n"
         f"🔗 <b>Username</b>: {username}\n"
         f"🆔 <b>ID</b>: <code>{user.id}</code>\n"
-        f"✍️ <i>Ответьте на это сообщение реплаем — бот отправит ответ клиенту.</i>"
+        f"✍️ <i>Отвечайте на сообщение реплаем</i>"
     )
 
 
@@ -119,5 +119,6 @@ async def from_group_to_client(message: types.Message):
 if __name__ == "__main__":
     init_db()
     executor.start_polling(dp, skip_updates=True)
+
 
 
