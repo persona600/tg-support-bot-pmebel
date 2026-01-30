@@ -164,10 +164,19 @@ async def lpt_request(session: aiohttp.ClientSession, method: str, path: str, js
 
 async def lpt_create_lead(session: aiohttp.ClientSession, tg_user: types.User) -> int:
     lead_name = f"Telegram: {(tg_user.full_name or 'Клиент').strip()}"
+    username = f"@{tg_user.username}" if tg_user.username else "нет"
+
+    details = (
+        f"Источник: Telegram бот\n"
+        f"Имя: {tg_user.full_name}\n"
+        f"Username: {username}\n"
+        f"Telegram ID: {tg_user.id}"
+    )
 
     body = {
         "contact": {"project_id": LP_PROJECT_ID, "name": lead_name},
-        "name": lead_name
+        "name": lead_name,
+        "details": details
     }
 
     data = await lpt_request(session, "POST", "/lead", json_body=body)
@@ -296,6 +305,10 @@ async def from_group_to_client(message: types.Message):
     # работаем только в нашей группе
     if message.chat.id != GROUP_ID:
         return
+    # игнорируем сообщения от ботов (в т.ч. от нашего бота),
+    # иначе бот будет ругаться сам на себя
+    if message.from_user and message.from_user.is_bot:
+        return
 
     # не реагируем на команды типа /id
     if message.text and message.text.strip().startswith("/"):
@@ -325,5 +338,6 @@ async def from_group_to_client(message: types.Message):
 if __name__ == "__main__":
     init_db()
     executor.start_polling(dp, skip_updates=True)
+
 
 
