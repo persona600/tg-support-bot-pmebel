@@ -124,6 +124,9 @@ def get_thread(user_id: int):
 # ===== LPTracker token cache =====
 _lp_token = None
 
+# ===== LPTracker contact field cache =====
+_lp_telegram_field_id = None  # int | 0 | None
+
 
 def lpt_enabled() -> bool:
     return bool(LP_LOGIN and LP_PASSWORD and LP_PROJECT_ID)
@@ -162,35 +165,72 @@ async def lpt_request(session: aiohttp.ClientSession, method: str, path: str, js
     return data
 
 
-# ✅✅✅ ИЗМЕНЕНО ТОЛЬКО ЗДЕСЬ: lpt_create_lead
+async def lpt_get_contact_field_id_by_name(session: aiohttp.ClientSession, field_name: str) -> int | None:
+    """
+    Находит ID кастомного поля контакта по названию (например "Telegram").
+    Кешируем значение, чтобы не дергать API на каждое сообщение.
+    """
+    global _lp_telegram_field_id
+
+    # уже искали: _lp_telegram_field_id = int (нашли) или 0 (не нашли)
+    if _lp_telegram_field_id is not None:
+        return _lp_telegram_field_id if _lp_telegram_field_id != 0 else None
+
+    data = await lpt_request(session, "GET", f"/project/{LP_PROJECT_ID}/fields", json_body=None)
+    if not data or data.get("status") != "success":
+        _lp_telegram_field_id = 0
+        return None
+
+    fields = data.get("result") or []
+    target = field_name.strip().lower()
+
+    for f in fields:
+        name = str(f.get("name", "")).strip().lower()
+        if name == target:
+            _lp_telegram_field_id = int(f["id"])
+            return _lp_telegram_field_id
+
+    _lp_telegram_field_id = 0
+    return None
+
+
 async def lpt_create_lead(session: aiohttp.ClientSession, tg_user: types.User) -> int:
+    """
+    ВАЖНОЕ ИСПРАВЛЕНИЕ:
+    LPTracker требует contact.details (email/phone). Поэтому кладем details внутрь contact.
+    Также пишем username в кастомное поле контакта "Telegram" (если такое поле есть в проекте).
+    """
     lead_name = f"Telegram: {(tg_user.full_name or 'Клиент').strip()}"
 
-    # LPTracker требует contact.details (email/phone/telegram и т.п.)
-    # Делаем тех. email из Telegram ID для уникальности.
+    # обязательное: contact.details
     details_list = [
         {"type": "email", "data": f"tg{tg_user.id}@telegram.invalid"}
     ]
 
-    # Если есть username — добавляем в поле Telegram (как у тебя на скрине)
+    # кастомное поле контакта "Telegram" (как у тебя в карточке)
+    contact_fields = {}
     if tg_user.username:
-        details_list.append({"type": "telegram", "data": tg_user.username})
+        telegram_field_id = await lpt_get_contact_field_id_by_name(session, "Telegram")
+        if telegram_field_id:
+            contact_fields[str(telegram_field_id)] = tg_user.username
 
     body = {
         "contact": {
             "project_id": LP_PROJECT_ID,
-            "name": lead_name,
+            "name": (tg_user.full_name or "Клиент").strip(),
             "details": details_list
         },
         "name": lead_name
     }
+
+    if contact_fields:
+        body["contact"]["fields"] = contact_fields
 
     data = await lpt_request(session, "POST", "/lead", json_body=body)
     if data.get("status") != "success":
         raise RuntimeError(f"LPTracker create lead error: {data}")
 
     return int(data["result"]["id"])
-# ✅✅✅ КОНЕЦ ИЗМЕНЕНИЯ
 
 
 async def lpt_add_comment(session: aiohttp.ClientSession, lead_id: int, text: str):
@@ -339,7 +379,6 @@ async def from_group_to_client(message: types.Message):
         await bot.send_message(chat_id=user_id, text=message.text)
     else:
         await message.copy_to(chat_id=user_id)
-
 
 
 if __name__ == "__main__":
