@@ -162,21 +162,27 @@ async def lpt_request(session: aiohttp.ClientSession, method: str, path: str, js
     return data
 
 
+# ✅✅✅ ИЗМЕНЕНО ТОЛЬКО ЗДЕСЬ: lpt_create_lead
 async def lpt_create_lead(session: aiohttp.ClientSession, tg_user: types.User) -> int:
     lead_name = f"Telegram: {(tg_user.full_name or 'Клиент').strip()}"
-    username = f"@{tg_user.username}" if tg_user.username else "нет"
 
-    details = (
-        f"Источник: Telegram бот\n"
-        f"Имя: {tg_user.full_name}\n"
-        f"Username: {username}\n"
-        f"Telegram ID: {tg_user.id}"
-    )
+    # LPTracker требует contact.details (email/phone/telegram и т.п.)
+    # Делаем тех. email из Telegram ID для уникальности.
+    details_list = [
+        {"type": "email", "data": f"tg{tg_user.id}@telegram.invalid"}
+    ]
+
+    # Если есть username — добавляем в поле Telegram (как у тебя на скрине)
+    if tg_user.username:
+        details_list.append({"type": "telegram", "data": tg_user.username})
 
     body = {
-        "contact": {"project_id": LP_PROJECT_ID, "name": lead_name},
-        "name": lead_name,
-        "details": details
+        "contact": {
+            "project_id": LP_PROJECT_ID,
+            "name": lead_name,
+            "details": details_list
+        },
+        "name": lead_name
     }
 
     data = await lpt_request(session, "POST", "/lead", json_body=body)
@@ -184,6 +190,7 @@ async def lpt_create_lead(session: aiohttp.ClientSession, tg_user: types.User) -
         raise RuntimeError(f"LPTracker create lead error: {data}")
 
     return int(data["result"]["id"])
+# ✅✅✅ КОНЕЦ ИЗМЕНЕНИЯ
 
 
 async def lpt_add_comment(session: aiohttp.ClientSession, lead_id: int, text: str):
@@ -338,6 +345,3 @@ async def from_group_to_client(message: types.Message):
 if __name__ == "__main__":
     init_db()
     executor.start_polling(dp, skip_updates=True)
-
-
-
